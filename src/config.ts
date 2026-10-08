@@ -18,7 +18,20 @@ export interface Config {
     password: string;
   };
   allowWrite: boolean;
+  /** Dynamic trunk/extension provisioning, independent of allowWrite. */
+  allowProvision: boolean;
+  /** Managed PJSIP include file that provisioning is confined to. */
+  pjsipFile: string;
+  trunkAllow: string[];
+  contextAllow: string[];
   timeoutMs: number;
+}
+
+function list(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 function num(value: string | undefined, fallback: number): number {
@@ -29,6 +42,10 @@ function num(value: string | undefined, fallback: number): number {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cfg: Config = {
     allowWrite: /^(1|true|yes)$/i.test(env.PBX_MCP_ALLOW_WRITE ?? ""),
+    allowProvision: /^(1|true|yes)$/i.test(env.PBX_MCP_ALLOW_PROVISION ?? ""),
+    pjsipFile: env.PBX_MCP_PJSIP_FILE?.trim() || "pjsip_mcp.conf",
+    trunkAllow: list(env.PBX_MCP_TRUNK_ALLOW),
+    contextAllow: list(env.PBX_MCP_CONTEXT_ALLOW),
     timeoutMs: num(env.PBX_MCP_TIMEOUT_MS, 10000),
   };
 

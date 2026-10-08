@@ -5,3 +5,5 @@ dist/
 .DS_Store
 mcp-publisher.exe
 .npmrc
+
+.env.local

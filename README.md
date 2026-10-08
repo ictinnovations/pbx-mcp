@@ -99,6 +99,15 @@ write = command
 | `PBX_MCP_ALLOW_WRITE` | `false` | Unlocks call control. Read the safety section first |
 | `PBX_MCP_TIMEOUT_MS` | `10000` | Per command timeout |
 
+### Provisioning (Asterisk only, opt-in)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `PBX_MCP_ALLOW_PROVISION` | `false` | Registers the six trunk and extension tools. Independent of `PBX_MCP_ALLOW_WRITE` |
+| `PBX_MCP_TRUNK_ALLOW` | *(unset)* | Comma-separated IPv4 CIDRs and hostnames a trunk may point at. **Unset means `asterisk_trunk_create` is refused** |
+| `PBX_MCP_CONTEXT_ALLOW` | *(unset)* | Comma-separated dialplan contexts new objects may use. Unset means every create is refused |
+| `PBX_MCP_PJSIP_FILE` | `pjsip_mcp.conf` | The one include file provisioning writes to. A bare `pjsip_*.conf` name (never `pjsip.conf`, `manager.conf` or any other file) |
+
 ## Claude Desktop
 
 Add this to `claude_desktop_config.json`:
@@ -196,6 +205,110 @@ A PBX is not a scratch pad. Reloading a profile drops registrations, and an orig
 **Output is clamped** to 20,000 characters. One `show channels` on a busy switch won't flood the context window.
 
 Even with all that, give the AMI user the narrowest permission set that answers your questions, and put the PBX behind a firewall rather than on the public internet.
+
+## Provisioning trunks and extensions (Asterisk, opt-in)
+
+Six more tools create, list and delete PJSIP trunks and SIP extensions through AMI `UpdateConfig`. They are registered only when `PBX_MCP_ALLOW_PROVISION=true`, and they are separate from write mode: enabling one does not enable the other.
+
+| Tool | What it does |
+|---|---|
+| `asterisk_trunk_create` | IP-authenticated trunk: endpoint, aor and identify. Fields: `name`, `host`, `port` (5060), `transport` (`udp`, `tcp`, `tls`), `codecs`, `context`, `dry_run` |
+| `asterisk_trunk_list` / `asterisk_trunk_delete` | List or remove trunks this server created |
+| `asterisk_extension_create` | A SIP endpoint phones register to (endpoint, aor, auth), not a dialplan extension. Fields: `number`, `context`, `codecs`, `dry_run`. The generated password is returned once |
+| `asterisk_extension_list` / `asterisk_extension_delete` | List or remove extensions this server created. Passwords are never listed |
+
+Codecs are `ulaw`, `alaw`, `g722`, `g729`, `opus`. Names and numbers match `^[A-Za-z0-9_-]{1,32}$`.
+
+### One-time setup
+
+1. Create the managed file, empty, beside `pjsip.conf` (a missing include is an error), and let Asterisk write to it:
+
+   ```bash
+   touch /etc/asterisk/pjsip_mcp.conf
+   ```
+
+2. Add this single line at the end of `pjsip.conf`. Nothing else in `pjsip.conf` is ever touched:
+
+   ```ini
+   #include pjsip_mcp.conf
+   ```
+
+3. Give the AMI user the extra permissions provisioning needs. `config` is for `UpdateConfig`/`GetConfig`, `command` for the reload and verify steps, `originate` only if you also use write mode:
+
+   ```ini
+   [mcp]
+   secret = change-me
+   deny = 0.0.0.0/0.0.0.0
+   permit = 192.0.2.0/24
+   read = system,call,command
+   write = command,originate,config
+   ```
+
+4. Trunks reference a transport named `transport-udp`, `transport-tcp` or `transport-tls`; define the ones you will use in `pjsip.conf`.
+
+### How it works
+
+- Everything goes into the managed file with `UpdateConfig` (`NewCat`, `Append`, `RenameCat`, `DelCat`), then `module reload res_pjsip.so`, then `pjsip show endpoint mcp-<name>`. If Asterisk does not report the endpoint, the change is removed again and the call returns an error.
+- Every object is named `mcp-<name>`. List and delete only act on `mcp-` sections of the managed file, and a trunk cannot be deleted as an extension or the other way round.
+- Create refuses a name that already exists. `dry_run=true` returns the exact config block and makes no AMI calls; for an extension the password is shown as a placeholder.
+- All provisioning calls are serialized in-process, because `UpdateConfig` is read-modify-write. Run only one pbx-mcp provisioner per managed file.
+- **An extension registers as `mcp-<number>`**, not the bare number. PJSIP matches the endpoint and its AOR by the registering username, and every object has to carry the `mcp-` prefix. The create response states the username.
+- The password is 24 random URL-safe characters from `crypto.randomBytes`. It is returned only in the create response, which is the only place it is ever shown or logged; it does exist in the managed file on the PBX, as any SIP password must.
+
+### Toll fraud: read this before enabling
+
+A SIP trunk lets calls leave your PBX, and a registrable extension with a context that reaches an outbound route lets anyone who learns the password do the same. Stolen SIP credentials are a leading cause of large telephony bills.
+
+- Point `PBX_MCP_CONTEXT_ALLOW` at contexts that cannot dial out to the PSTN unless you really mean it. The context is the only thing that decides what a registered phone or trunk may call.
+- Keep `PBX_MCP_TRUNK_ALLOW` as narrow as you can. Hostnames are compared literally and never resolved, so DNS cannot widen the list. IPv6 is not supported.
+- An empty allowlist refuses everything: provisioning fails closed.
+- Treat the assistant that holds these tools as holding the ability to change who can reach your PBX. Review what it creates (`*_list`, or `dry_run` first), and do not expose SIP (5060) or AMI (5038) to the internet.
+- Prefer a lab or staging PBX when trying this out.
+
+### Example flow
+
+Using documentation addresses (RFC 5737) only. Environment:
+
+```bash
+PBX_MCP_ALLOW_PROVISION=true
+PBX_MCP_TRUNK_ALLOW=192.0.2.0/24,198.51.100.0/24
+PBX_MCP_CONTEXT_ALLOW=from-trunk,from-internal
+```
+
+1. Preview a trunk with `asterisk_trunk_create` and `dry_run=true`:
+
+   ```json
+   { "name": "carrier1", "host": "192.0.2.10", "port": 5060, "transport": "udp",
+     "codecs": ["ulaw", "alaw"], "context": "from-trunk", "dry_run": true }
+   ```
+
+   which returns
+
+   ```ini
+   [mcp-carrier1]
+   type=endpoint
+   transport=transport-udp
+   context=from-trunk
+   disallow=all
+   allow=ulaw,alaw
+   aors=mcp-carrier1
+
+   [mcp-carrier1]
+   type=aor
+   contact=sip:192.0.2.10:5060
+
+   [mcp-carrier1]
+   type=identify
+   endpoint=mcp-carrier1
+   match=192.0.2.10
+   ```
+
+2. Run it again without `dry_run`. A host outside the allowlist, for example `203.0.113.5`, is refused.
+3. Create an extension: `{ "number": "1001", "context": "from-internal" }`. The reply gives the SIP username `mcp-1001` and the password, once.
+4. Point a phone at the PBX with those credentials, then check it with `asterisk_endpoints`.
+5. `asterisk_extension_list` and `asterisk_trunk_list` show what exists; `asterisk_extension_delete` with `1001` and `asterisk_trunk_delete` with `carrier1` remove it again.
+
+Tested against Asterisk 22 (certified 22.8). The PJSIP options used (`identify`, `max_contacts`, `remove_existing`, `auth_type=userpass`) and the `UpdateConfig` features (`RenameCat`, `catfilter`) are standard, but re-check them on other Asterisk versions. TCP and TLS trunks are generated but were not exercised against a live peer.
 
 ## Build from source
 

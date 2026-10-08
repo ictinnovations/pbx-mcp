@@ -14,6 +14,7 @@ import { AmiClient } from "./ami.js";
 import { EslClient } from "./esl.js";
 import { loadConfig } from "./config.js";
 import { registerAsteriskTools } from "./tools/asterisk.js";
+import { registerProvisioningTools } from "./tools/provision.js";
 import { registerFreeswitchTools } from "./tools/freeswitch.js";
 
 const cfg = loadConfig();
@@ -62,14 +63,12 @@ function lazyClient<T extends { connect(): Promise<void>; close(): void }>(creat
 
 if (cfg.asterisk) {
   const ami = cfg.asterisk;
-  registerAsteriskTools(
-    server,
-    cfg,
-    lazyClient(
-      () => new AmiClient({ ...ami, timeoutMs: cfg.timeoutMs }),
-      (c) => c.isConnected
-    )
+  const getAmi = lazyClient(
+    () => new AmiClient({ ...ami, timeoutMs: cfg.timeoutMs }),
+    (c) => c.isConnected
   );
+  registerAsteriskTools(server, cfg, getAmi);
+  if (cfg.allowProvision) registerProvisioningTools(server, cfg, getAmi);
 }
 
 if (cfg.freeswitch) {
