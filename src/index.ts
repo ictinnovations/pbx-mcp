@@ -29,7 +29,7 @@ if (!cfg.asterisk && !cfg.freeswitch) {
 }
 
 const server = new McpServer(
-  { name: "pbx-mcp", version: "0.1.1" },
+  { name: "pbx-mcp", version: "0.1.4" },
   {
     instructions:
       "Inspect and control Asterisk and FreeSWITCH telephony servers. " +
